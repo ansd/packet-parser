@@ -1,20 +1,12 @@
 -module(packet).
 
--export([client/0, server4/0, server0/0]).
+-export([client/0,
+         server4/0,
+         server0/0]).
 
 -define(DURATION, 30_000).
--define(PORT, 4001).
--define(MSG_BYTES, 5_000).
-
--record(parser,
-        {
-         data ::
-         undefined |
-         %% this is only if the binary is smaller than 4 bytes
-         binary() |
-         {RemainingBytes :: non_neg_integer(), iodata()},
-         counter
-        }).
+-define(MSG_BYTES, 1500).
+-define(PORT, 4000).
 
 client() ->
     {ok, Sock} = gen_tcp:connect("localhost", ?PORT, [binary, {packet, 0}]),
@@ -26,18 +18,19 @@ client_loop(Sock, Counter) ->
         ok ->
             case Counter rem 10_000 of
                 0 ->
-                    io:format("client: sent ~p messages~n", [Counter]);
+                    io:format("client: sent ~w messages~n", [Counter]);
                 _ ->
                     ok
             end,
             client_loop(Sock, Counter + 1);
         {error, Reason} ->
-            io:format("client got ~p with ~w sent messages~n", [Reason, Counter])
+            io:format("client got '~p' with ~w sent messages~n", [Reason, Counter])
     end.
 
+%% uses socket option {packet, 4}
 server4() ->
     {ok, LSock} = gen_tcp:listen(?PORT, [binary, {packet, 4}]),
-    io:format("server: listening...~n", []),
+    io:format("server: listening~n", []),
     {ok, Sock} = gen_tcp:accept(LSock),
     io:format("server: accepted~n", []),
     _TimerRef = erlang:send_after(?DURATION, self(), stop),
@@ -47,22 +40,28 @@ server4_loop(Sock, Counter) ->
     ok = inet:setopts(Sock, [{active, once}]),
     receive
         {tcp, Sock, Data} ->
-            % case Counter rem 10_000 of
-            %     0 ->
-            %         io:format("server: received ~p messages~n", [Counter]);
-            %     _ ->
-            %         ok
-            % end,
+            %% Use the data.
             ?MSG_BYTES = byte_size(Data),
             server4_loop(Sock, Counter + 1);
         Other ->
-            io:format("server: got ~p, received ~w messages~n", [Other, Counter]),
+            io:format("server: got '~p' with ~w received messages~n", [Other, Counter]),
             ok = gen_tcp:close(Sock)
     end.
 
+-record(parser,
+        {
+         data ::
+         undefined |
+         %% used only if the binary is smaller than 4 bytes
+         binary() |
+         {RemainingBytes :: non_neg_integer(), Reversed :: iodata()},
+         counter :: non_neg_integer()
+        }).
+
+%% uses socket option {packet, 0}
 server0() ->
     {ok, LSock} = gen_tcp:listen(?PORT, [binary, {packet, 0}]),
-    io:format("server: listening...~n", []),
+    io:format("server: listening~n", []),
     {ok, Sock} = gen_tcp:accept(LSock),
     io:format("server: accepted~n", []),
     _TimerRef = erlang:send_after(?DURATION, self(), stop),
@@ -72,16 +71,10 @@ server0_loop(Sock, #parser{counter = Counter} = State0) ->
     ok = inet:setopts(Sock, [{active, once}]),
     receive
         {tcp, Sock, Data} ->
-            % case Counter rem 10_000 of
-            %     0 ->
-            %         io:format("server: received ~p messages~n", [Counter]);
-            %     _ ->
-            %         ok
-            % end,
             State = incoming_data(Data, State0),
             server0_loop(Sock, State);
         Other ->
-            io:format("server: got ~p, received ~w messages~n", [Other, Counter]),
+            io:format("server: got '~p' with ~w received messages~n", [Other, Counter]),
             ok = gen_tcp:close(Sock)
     end.
 
@@ -89,11 +82,12 @@ incoming_data(<<>>, State) ->
     State;
 incoming_data(<<Size:32, Frame:Size/binary, Rem/binary>>,
               #parser{data = undefined,
-                      counter = C} = State) ->
+                      counter = Counter} = State) ->
+    %% Use the data. In this case, we sanity check that we parsed correctly.
     ?MSG_BYTES = byte_size(Frame),
     incoming_data(Rem,
                   State#parser{data = undefined,
-                               counter = C + 1});
+                               counter = Counter + 1});
 incoming_data(<<Size:32, Rem/binary>>,
               #parser{data = undefined} = State) ->
     %% not enough data to complete message, stash and await more data
@@ -106,20 +100,20 @@ incoming_data(Data,
     State#parser{data = Data};
 incoming_data(Data,
               #parser{data = {Size, Partial},
-                      counter = C} = State) ->
+                      counter = Counter} = State) ->
     case Data of
         <<Part:Size/binary, Rem/binary>> ->
-            %% enough data, assemble frame into binary, expensive!
-            Frame0 = append_data(Partial, Part),
-            Frame = iolist_to_binary(Frame0),
+            %% Enough data, assemble frame into binary.
+            Frame = assemble_frame(Partial, Part),
+            %% Use the data. In this case, we sanity check that we parsed correctly.
             ?MSG_BYTES = byte_size(Frame),
             incoming_data(Rem,
                           State#parser{data = undefined,
-                                       counter = C + 1});
+                                       counter = Counter + 1});
         Rem ->
             %% still not enough data, stash further
             State#parser{data = {Size - byte_size(Rem),
-                                 append_data(Partial, Rem)}}
+                                 prepend_data(Partial, Rem)}}
     end;
 incoming_data(Data,
               #parser{data = Partial} = State)
@@ -127,7 +121,16 @@ incoming_data(Data,
     incoming_data(<<Partial/binary, Data/binary>>,
                   State#parser{data = undefined}).
 
-append_data(Prev, Data) when is_binary(Prev) ->
-    [Prev, Data];
-append_data(Prev, Data) when is_list(Prev) ->
-    Prev ++ [Data].
+prepend_data(Prev, Data) when is_binary(Prev) ->
+    [Data, Prev];
+prepend_data(Prev, Data) when is_list(Prev) ->
+    [Data | Prev].
+
+assemble_frame(Prev, Data) when is_binary(Prev) ->
+    <<Prev/binary, Data/binary>>;
+assemble_frame(Prev, Data) when is_list(Prev) ->
+    IOListReversed = [Data | Prev],
+    IOList = lists:reverse(IOListReversed),
+    %% This is expensive, but we want to compare apples with apples:
+    %% server4/0 also gives us a single binary per message (instead of an iolist).
+    iolist_to_binary(IOList).
