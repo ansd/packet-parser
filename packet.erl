@@ -4,9 +4,12 @@
          server4/0,
          server0/0]).
 
--define(DURATION, 30_000).
--define(MSG_BYTES, 1500).
 -define(PORT, 4000).
+-define(DURATION, 30_000).
+-define(MSG_BYTES, 1400).
+%% ACTIVE applies only to server4 to get a fairer comparison
+%% since server0 reads the entire TCP buffer in one go
+-define(ACTIVE, once). %% true | once | N
 
 client() ->
     {ok, Sock} = gen_tcp:connect("localhost", ?PORT, [binary, {packet, 0}]),
@@ -29,7 +32,7 @@ client_loop(Sock, Counter) ->
 
 %% uses socket option {packet, 4}
 server4() ->
-    {ok, LSock} = gen_tcp:listen(?PORT, [binary, {packet, 4}]),
+    {ok, LSock} = gen_tcp:listen(?PORT, [binary, {packet, 4}, {active, ?ACTIVE}]),
     io:format("server: listening~n", []),
     {ok, Sock} = gen_tcp:accept(LSock),
     io:format("server: accepted~n", []),
@@ -37,12 +40,21 @@ server4() ->
     server4_loop(Sock, 0).
 
 server4_loop(Sock, Counter) ->
-    ok = inet:setopts(Sock, [{active, once}]),
+    case ?ACTIVE of
+        once ->
+            ok = inet:setopts(Sock, [{active, once}]);
+        _ ->
+            ok
+    end,
     receive
         {tcp, Sock, Data} ->
             %% Use the data.
             ?MSG_BYTES = byte_size(Data),
             server4_loop(Sock, Counter + 1);
+        {tcp_passive, Sock} ->
+            % io:format("server: entered passive mode with ~w received messages~n", [Counter]),
+            ok = inet:setopts(Sock, [{active, ?ACTIVE}]),
+            server4_loop(Sock, Counter);
         Other ->
             io:format("server: got '~p' with ~w received messages~n", [Other, Counter]),
             ok = gen_tcp:close(Sock)
