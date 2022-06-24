@@ -38,3 +38,6 @@ The columns show number of messages received across 2 different runs of 30 secon
 | 10,000              | 4,480,000 - 4,690,000   | 3,630,000 - 3,660,000 | | |
 | 100,000             | 488,000 - 493,000       | 892,000 - 892,000 | | |
 | 1,000,000,000 (1GB) | 16 - 16                 | 70 - 72 | 73 - 74 | 77 - 77 |
+
+### Discussion
+See https://erlangforums.com/t/performance-of-socket-option-packet-4/1562
